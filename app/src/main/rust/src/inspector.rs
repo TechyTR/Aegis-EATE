@@ -8,6 +8,16 @@ pub struct Verdict { pub is_safe: bool, pub risk_score: u8, pub reason: String }
 pub fn inspect_url(raw_url: &str) -> Verdict {
     let input = raw_url.trim();
     if input.is_empty() || input.len() > 2048 { return result(100, "URL boş veya izin verilen uzunluğu aşıyor"); }
+    // Reject explicit non-web schemes before treating a bare host as HTTPS.
+    if let Some((candidate, _)) = input.split_once(':') {
+        let looks_like_scheme = !candidate.is_empty()
+            && candidate.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+            && candidate.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
+            && !candidate.contains('.');
+        if looks_like_scheme && !candidate.eq_ignore_ascii_case("http") && !candidate.eq_ignore_ascii_case("https") {
+            return result(90, "Desteklenmeyen bağlantı protokolü");
+        }
+    }
     let normalized = if input.contains("://") { input.to_owned() } else { format!("https://{input}") };
     let lower = normalized.to_ascii_lowercase();
     let Some((scheme, rest)) = lower.split_once("://") else { return result(80, "URL biçimi tanınmadı"); };
@@ -36,6 +46,6 @@ fn result(score: u8, reason: &str) -> Verdict { Verdict { is_safe: false, risk_s
     use super::inspect_url;
     #[test] fn accepts_normal_https_url_as_low_risk() { let v = inspect_url("https://example.com"); assert!(v.is_safe); assert_eq!(v.risk_score, 0); }
     #[test] fn flags_plain_http_without_network_access() { let v = inspect_url("http://example.com"); assert!(v.risk_score >= 15); assert!(!v.reason.is_empty()); }
-    #[test] fn rejects_unsupported_schemes() { assert!(!inspect_url("javascript:alert(1)").is_safe); }
+    #[test] fn rejects_unsupported_schemes() { assert!(!inspect_url("javascript:alert(1)").is_safe); assert!(!inspect_url("data:text/html,test").is_safe); }
     #[test] fn handles_empty_and_oversized_input() { assert!(!inspect_url("").is_safe); assert!(!inspect_url(&"a".repeat(2049)).is_safe); }
 }
