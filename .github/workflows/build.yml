@@ -39,7 +39,7 @@ jobs:
         run: cargo install cargo-ndk --locked
       - name: Run Rust unit tests
         working-directory: app/src/main/rust
-        run: cargo test --locked
+        run: cargo test
       - name: Build Rust security core
         working-directory: app/src/main/rust
         env:
