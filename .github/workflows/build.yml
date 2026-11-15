@@ -25,10 +25,12 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-      - name: Install Android SDK and NDK
-        run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;26.3.11579264"
+      - name: Prepare Android SDK
+        shell: bash
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;26.3.11579264"
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
