@@ -52,8 +52,55 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.6"
+      - name: Prepare persistent release keystore
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          GH_TOKEN: ${{ secrets.GH_SECRETS_TOKEN }}
+        run: |
+          set -euo pipefail
+          KEYSTORE_FILE="$RUNNER_TEMP/aegis-release.jks"
+
+          if ! { printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_FILE" 2>/dev/null && \
+                 keytool -list -keystore "$KEYSTORE_FILE" -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" >/dev/null 2>&1; }; then
+            if [ -z "${GH_TOKEN:-}" ]; then
+              echo "::error::Add GH_SECRETS_TOKEN with repository Secrets write permission to bootstrap the keystore."
+              exit 1
+            fi
+
+            rm -f "$KEYSTORE_FILE"
+            keytool -genkeypair -v \
+              -keystore "$KEYSTORE_FILE" \
+              -storetype JKS \
+              -alias "$KEY_ALIAS" \
+              -keyalg RSA \
+              -keysize 4096 \
+              -validity 10000 \
+              -storepass "$KEYSTORE_PASSWORD" \
+              -keypass "$KEY_PASSWORD" \
+              -dname "CN=Aegis EAWP, OU=Release, O=TechyTR, L=Istanbul, ST=Istanbul, C=TR"
+
+            KEYSTORE_B64="$(base64 -w 0 "$KEYSTORE_FILE")"
+            gh secret set KEYSTORE_BASE64 --repo "$GITHUB_REPOSITORY" --body "$KEYSTORE_B64"
+          fi
+
+          echo "KEYSTORE_FILE=$KEYSTORE_FILE" >> "$GITHUB_ENV"
+          echo "Release keystore is ready."
       - name: Build Android release
+        env:
+          KEYSTORE_FILE: ${{ runner.temp }}/aegis-release.jks
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: gradle --no-daemon clean assembleRelease
+      - name: Verify APK signature
+        run: |
+          APK="$(find app/build/outputs/apk/release -name '*.apk' -print -quit)"
+          test -n "$APK"
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose "$APK"
       - name: Upload release APK
         uses: actions/upload-artifact@v4
         with:
