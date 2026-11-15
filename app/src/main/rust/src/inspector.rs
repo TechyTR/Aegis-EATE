@@ -1,102 +1,51 @@
-use crate::spoofer::generate_identity;
 use serde::Serialize;
-use std::time::Duration;
+use std::net::IpAddr;
 
 #[derive(Serialize)]
-pub struct Verdict {
-    pub is_safe: bool,
-    pub risk_score: u8,
-    pub reason: String,
-}
+pub struct Verdict { pub is_safe: bool, pub risk_score: u8, pub reason: String }
 
+/// Offline, bounded-cost URL triage. Heuristic signal only, not a malware verdict.
 pub fn inspect_url(raw_url: &str) -> Verdict {
-    let target = if raw_url.starts_with("http://") || raw_url.starts_with("https://") {
-        raw_url.to_string()
-    } else {
-        format!("https://{}", raw_url)
-    };
-
-    let identity = generate_identity();
-    let mut risk_score: u8 = 0;
+    let input = raw_url.trim();
+    if input.is_empty() || input.len() > 2048 { return result(100, "URL boş veya izin verilen uzunluğu aşıyor"); }
+    // Reject explicit non-web schemes before treating a bare host as HTTPS.
+    if let Some((candidate, _)) = input.split_once(':') {
+        let looks_like_scheme = !candidate.is_empty()
+            && candidate.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+            && candidate.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
+            && !candidate.contains('.');
+        if looks_like_scheme && !candidate.eq_ignore_ascii_case("http") && !candidate.eq_ignore_ascii_case("https") {
+            return result(90, "Desteklenmeyen bağlantı protokolü");
+        }
+    }
+    let normalized = if input.contains("://") { input.to_owned() } else { format!("https://{input}") };
+    let lower = normalized.to_ascii_lowercase();
+    let Some((scheme, rest)) = lower.split_once("://") else { return result(80, "URL biçimi tanınmadı"); };
+    if scheme != "https" && scheme != "http" { return result(90, "Desteklenmeyen bağlantı protokolü"); }
+    let mut score: u8 = 0;
     let mut reasons: Vec<&str> = Vec::new();
-
-    if target.starts_with("http://") {
-        risk_score += 20;
-        reasons.push("Şifresiz HTTP bağlantısı");
-    }
-
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_millis(1200))
-        .timeout_read(Duration::from_millis(1500))
-        .build();
-
-    match agent
-        .get(&target)
-        .set("User-Agent", identity.user_agent)
-        .set("Sec-CH-UA-Platform", identity.platform)
-        .set("Accept-Language", identity.accept_lang)
-        .set("DNT", "1")
-        .call()
-    {
-        Ok(response) => {
-            let final_url = response.get_url().to_string();
-
-            // 1. Farklı alan adına yönlendirme kontrolü
-            let orig_host = extract_host(&target);
-            let final_host = extract_host(&final_url);
-            if !orig_host.is_empty() && !final_host.is_empty() && orig_host != final_host {
-                risk_score += 35;
-                reasons.push("Şüpheli alan adı yönlendirmesi");
-            }
-
-            // 2. İlk 16 KB içeriği sıfır ekstra bellek yüküyle tara
-            if let Ok(body) = response.into_string() {
-                let sample: String = body.chars().take(16384).collect::<String>().to_lowercase();
-
-                let mut suspicious_hits = 0;
-                let signatures = [
-                    "eval(atob(",
-                    "document.write(unescape",
-                    "cvv",
-                    "kart_no",
-                    "tc_kimlik",
-                    "card_number",
-                ];
-
-                for sig in signatures {
-                    if sample.contains(sig) {
-                        suspicious_hits += 1;
-                    }
-                }
-
-                if suspicious_hits >= 2 {
-                    risk_score += 50;
-                    reasons.push("Oltalama veya gizlenmiş zararlı betik tespit edildi");
-                }
-            }
-        }
-        Err(_) => {
-            // Bağlantı kurulamazsa kullanıcıyı kilitlememek için düşük riskli geçiş
-            reasons.push("Hızlı ön kontrol zaman aşımı");
-        }
-    }
-
-    Verdict {
-        is_safe: risk_score < 50,
-        risk_score,
-        reason: if reasons.is_empty() {
-            "Temiz".to_string()
-        } else {
-            reasons.join(" | ")
-        },
-    }
+    if scheme == "http" { score = score.saturating_add(15); reasons.push("Şifrelenmemiş HTTP bağlantısı"); }
+    let authority = rest.split(|c| c == '/' || c == '?' || c == '#').next().unwrap_or("");
+    let host_port = authority.rsplit('@').next().unwrap_or("");
+    if authority.contains('@') { score = score.saturating_add(25); reasons.push("Adres içinde kullanıcı bilgisi bulunuyor"); }
+    let host = host_port.split(':').next().unwrap_or("").trim_start_matches('[').trim_end_matches(']');
+    if host.parse::<IpAddr>().is_ok() { score = score.saturating_add(20); reasons.push("Alan adı yerine doğrudan IP adresi kullanılıyor"); }
+    if host.starts_with("xn--") || host.contains(".xn--") { score = score.saturating_add(15); reasons.push("Uluslararası karakter kodlaması içeren alan adı"); }
+    if host.split('.').count() > 5 { score = score.saturating_add(10); reasons.push("Alışılmadık derecede fazla alt alan adı"); }
+    if lower.contains("%00") || lower.contains("%0d") || lower.contains("%0a") { score = score.saturating_add(20); reasons.push("Şüpheli kodlanmış kontrol karakteri"); }
+    let terms = ["login-verify", "account-secure", "password-reset", "wallet-connect"];
+    if terms.iter().any(|term| lower.contains(term)) { score = score.saturating_add(15); reasons.push("Kimlik doğrulama taklidiyle ilişkili URL kalıbı"); }
+    score = score.min(100);
+    let reason = if reasons.is_empty() { "Belirgin risk işareti bulunmadı; bu sonuç güvenlik garantisi değildir".to_owned() } else { reasons.join(" | ") };
+    Verdict { is_safe: score < 40, risk_score: score, reason }
 }
 
-fn extract_host(url: &str) -> &str {
-    url.split("://")
-        .nth(1)
-        .unwrap_or(url)
-        .split('/')
-        .next()
-        .unwrap_or("")
+fn result(score: u8, reason: &str) -> Verdict { Verdict { is_safe: false, risk_score: score, reason: reason.to_owned() } }
+
+#[cfg(test)] mod tests {
+    use super::inspect_url;
+    #[test] fn accepts_normal_https_url_as_low_risk() { let v = inspect_url("https://example.com"); assert!(v.is_safe); assert_eq!(v.risk_score, 0); }
+    #[test] fn flags_plain_http_without_network_access() { let v = inspect_url("http://example.com"); assert!(v.risk_score >= 15); assert!(!v.reason.is_empty()); }
+    #[test] fn rejects_unsupported_schemes() { assert!(!inspect_url("javascript:alert(1)").is_safe); assert!(!inspect_url("data:text/html,test").is_safe); }
+    #[test] fn handles_empty_and_oversized_input() { assert!(!inspect_url("").is_safe); assert!(!inspect_url(&"a".repeat(2049)).is_safe); }
 }

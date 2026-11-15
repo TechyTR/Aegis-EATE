@@ -7,15 +7,17 @@ import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Toast
 import com.nevruz.aegis.core.bridge.AegisNativeBridge
 import com.nevruz.aegis.core.bridge.ScanVerdict
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 
+/** Optional browser URL observer. Heuristic matches warn only; they never close pages. */
 class WebGuardAccessibilityService : AccessibilityService() {
-
-    private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    private val scope = CoroutineScope(Dispatchers.Main.immediate + SupervisorJob())
     private var lastUrl = ""
-
-    // Aynı siteye tekrar tekrar istek atıp pili/CPU'yu yormamak için bellek içi LRU önbellek
-    private val verdictCache = LruCache<String, ScanVerdict>(250)
+    private val verdictCache = LruCache<String, ScanVerdict>(96)
 
     private val urlBarIds = listOf(
         "com.android.chrome:id/url_bar",
@@ -25,24 +27,22 @@ class WebGuardAccessibilityService : AccessibilityService() {
     )
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        if (event == null) return
         val root = rootInActiveWindow ?: return
-        val url = findUrl(root) ?: return
+        val url = try { findUrl(root) } finally { root.recycle() } ?: return
+        if (url == lastUrl || !url.contains('.') || url.length > 2048) return
+        lastUrl = url
 
-        if (url != lastUrl && url.contains(".")) {
-            lastUrl = url
-            scope.launch {
-                val verdict = verdictCache.get(url) ?: AegisNativeBridge.inspectUrlFast(url).also {
-                    verdictCache.put(url, it)
-                }
-
-                if (!verdict.isSafe) {
-                    performGlobalAction(GLOBAL_ACTION_BACK)
-                    Toast.makeText(
-                        applicationContext,
-                        "AegisGuard Engelledi (${verdict.riskScore}): ${verdict.reason}",
-                        Toast.LENGTH_LONG
-                    ).show()
-                }
+        scope.launch {
+            val verdict = verdictCache.get(url) ?: AegisNativeBridge.inspectUrlFast(url).also {
+                verdictCache.put(url, it)
+            }
+            if (!verdict.isSafe) {
+                Toast.makeText(
+                    applicationContext,
+                    "Aegis uyarısı (${verdict.riskScore}/100): ${verdict.reason}",
+                    Toast.LENGTH_LONG
+                ).show()
             }
         }
     }
@@ -52,11 +52,14 @@ class WebGuardAccessibilityService : AccessibilityService() {
             val nodes = root.findAccessibilityNodeInfosByViewId(id)
             if (!nodes.isNullOrEmpty()) {
                 val text = nodes[0].text?.toString()?.trim()
-                if (!text.isNullOrEmpty() && !text.contains(" ")) return text
+                nodes.forEach { it.recycle() }
+                if (!text.isNullOrEmpty() && !text.contains(' ')) return text
             }
         }
         return null
     }
+
+    override fun onInterrupt() = Unit
 
     override fun onDestroy() {
         scope.cancel()

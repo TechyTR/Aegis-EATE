@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Aegis</string>
+    <string name="monitor_channel_name">Security monitoring</string>
+    <string name="monitor_channel_description">Status notifications for user-started security monitoring.</string>
+</resources>

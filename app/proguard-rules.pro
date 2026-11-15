@@ -1,0 +1,1 @@
+-keep class com.nevruz.aegis.core.bridge.AegisNativeBridge { *; }
